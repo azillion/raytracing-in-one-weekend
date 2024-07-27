@@ -1,5 +1,4 @@
 import "./style.css";
-import triangleShader from "./shaders/test1.wgsl.ts";
 
 export async function initWebGPU(canvas: HTMLCanvasElement) {
     const navigator: any = window.navigator;
@@ -24,129 +23,203 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
     return { device, context, presentationFormat };
 }
 
-function createRenderTriangle(device: any, context: any, presentationFormat: any): () => void {
+function createComputeShader(device: GPUDevice, textureSize: { width: number, height: number }) {
     const module = device.createShaderModule({
-        label: "shader",
-        code: triangleShader,
+        label: "Compute shader",
+        code: `
+            @group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                let dims = textureDimensions(output);
+                let coords = vec2<u32>(id.xy);
+                
+                if (coords.x >= dims.x || coords.y >= dims.y) {
+                    return;
+                }
+
+                let uv = vec2<f32>(coords) / vec2<f32>(dims);
+                let color = vec4<f32>(uv, 0.0, 1.0);
+                
+                textureStore(output, vec2<i32>(coords), color);
+            } 
+        `
     });
 
-    const pipeline = device.createRenderPipeline({
-        label: "hard coded red triangle pipeline",
-        layout: "auto",
-        vertex: {
-            module,
-            entryPoint: "vs",
-        },
-        fragment: {
-            module,
-            entryPoint: "fs",
-            targets: [{ format: presentationFormat }],
-        },
-    });
-
-    const renderPassDescriptor = {
-        label: "our basic canvas render pass",
-        colorAttachments: [
-            {
-                view: undefined,
-                clearValue: [0.3, 0.3, 0.3, 1.0],
-                loadOp: "clear",
-                storeOp: "store",
-            },
-        ],
-    };
-
-    return () => {
-        renderPassDescriptor.colorAttachments[0].view = context.getCurrentTexture().createView();
-
-        const encoder = device.createCommandEncoder({ label: "our basic render pass command encoder" });
-        const pass = encoder.beginRenderPass(renderPassDescriptor);
-        pass.setPipeline(pipeline);
-        pass.draw(3);
-        pass.end();
-        device.queue.submit([encoder.finish()]);
-    }
-}
-
-function createComputeShader(device: any): () => void {
-    const shader = `
-        @group(0) @binding(0) var<storage, read_write> data : array<f32>;
-        @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id : vec3u) {
-           let i = id.x;
-           data[i] = data[i] * 2.0;
-        }
-        `;
-    const module = device.createShaderModule({
-        label: "double data compute shader",
-        code: shader,
-    });
-
-    const pipleline = device.createComputePipeline({
-        label: "double data compute pipeline",
+    const pipeline = device.createComputePipeline({
+        label: "Compute pipeline",
         layout: "auto",
         compute: {
             module,
-            entryPoint: "main",
-        },
+            entryPoint: "main"
+        }
     });
 
-    const input = new Float32Array([1.0, 2.0, 3.0, 4.0]);
-    const buffer = device.createBuffer({
-        label: "data buffer",
-        size: input.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-    });
-    // SLOW: Copy the data to the GPU
-    device.queue.writeBuffer(buffer, 0, input);
-
-    const resultBuffer = device.createBuffer({
-        label: "result buffer",
-        size: input.byteLength,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    const texture = device.createTexture({
+        size: textureSize,
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
     });
 
     const bindGroup = device.createBindGroup({
-        label: "data bind group",
-        layout: pipleline.getBindGroupLayout(0),
+        layout: pipeline.getBindGroupLayout(0),
         entries: [
-            {
-                binding: 0,
-                resource: {
-                    buffer,
-                },
-            },
-        ],
+            { binding: 0, resource: texture.createView() }
+        ]
     });
 
-    return async () => {
-        const encoder = device.createCommandEncoder({ label: "compute command encoder" });
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(pipleline);
-        pass.setBindGroup(0, bindGroup);
-        pass.dispatchWorkgroups(input.length);
-        pass.end();
+    return { pipeline, bindGroup, texture };
+}
 
-        encoder.copyBufferToBuffer(buffer, 0, resultBuffer, 0, resultBuffer.size);
-        const commandBuffer = encoder.finish();
-        device.queue.submit([commandBuffer]);
+function createRenderPipeline(device: GPUDevice, format: GPUTextureFormat) {
+    const module = device.createShaderModule({
+        label: "Render shader",
+        code: `
+            struct VertexOutput {
+                @builtin(position) position: vec4<f32>,
+                @location(0) uv: vec2<f32>,
+            }
 
-        // SLOW: Copy the result back to the CPU
-        await resultBuffer.mapAsync(GPUMapMode.READ);
-        const result = new Float32Array(resultBuffer.getMappedRange());
-        console.log("input:", input);
-        console.log("Result:", result.map(f => f));
-        resultBuffer.unmap();
-    }
+            @vertex
+            fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+                var pos = array<vec2<f32>, 4>(
+                    vec2<f32>(-1.0, -1.0),
+                    vec2<f32>(1.0, -1.0),
+                    vec2<f32>(-1.0, 1.0),
+                    vec2<f32>(1.0, 1.0)
+                );
+
+                var uv = array<vec2<f32>, 4>(
+                    vec2<f32>(0.0, 1.0),
+                    vec2<f32>(1.0, 1.0),
+                    vec2<f32>(0.0, 0.0),
+                    vec2<f32>(1.0, 0.0)
+                );
+
+                var output: VertexOutput;
+                output.position = vec4<f32>(pos[vertexIndex], 0.0, 1.0);
+                output.uv = uv[vertexIndex];
+                return output;
+            }
+
+            @group(0) @binding(0) var textureSampler: sampler;
+            @group(0) @binding(1) var inputTexture: texture_2d<f32>;
+
+            @fragment
+            fn fragmentMain(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                return textureSample(inputTexture, textureSampler, uv);
+            }
+        `
+    });
+
+    return device.createRenderPipeline({
+        layout: "auto",
+        vertex: {
+            module,
+            entryPoint: "vertexMain"
+        },
+        fragment: {
+            module,
+            entryPoint: "fragmentMain",
+            targets: [{ format }]
+        },
+        primitive: {
+            topology: "triangle-strip",
+            stripIndexFormat: "uint32"
+        }
+    });
 }
 
 async function main() {
-    const { device, context, presentationFormat } = await initWebGPU(document.getElementById("canvas") as HTMLCanvasElement);
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const { device, context, presentationFormat } = await initWebGPU(canvas);
 
-    const renderTriangle = createRenderTriangle(device, context, presentationFormat);
-    const renderCompute = createComputeShader(device);
+    const width = canvas.getBoundingClientRect().width;
+    const height = canvas.getBoundingClientRect().height;
+    canvas.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
+    canvas.height = Math.max(1, Math.min(height, device.limits.maxTextureDimension2D));
+    let textureSize = { width: canvas.width, height: canvas.height };
 
-    renderTriangle();
-    renderCompute();
+    let computeShader = createComputeShader(device, textureSize);
+    let renderPipeline = createRenderPipeline(device, presentationFormat);
+
+    const sampler = device.createSampler({
+        magFilter: "linear",
+        minFilter: "linear"
+    });
+
+    let renderBindGroup: GPUBindGroup;
+
+    function updateBindGroups() {
+        renderBindGroup = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: sampler },
+                { binding: 1, resource: computeShader.texture.createView() }
+            ]
+        });
+    }
+
+    updateBindGroups();
+
+    function render() {
+        const commandEncoder = device.createCommandEncoder();
+
+        // Run compute shader
+        const computePass = commandEncoder.beginComputePass();
+        computePass.setPipeline(computeShader.pipeline);
+        computePass.setBindGroup(0, computeShader.bindGroup);
+        computePass.dispatchWorkgroups(Math.ceil(textureSize.width / 8), Math.ceil(textureSize.height / 8));
+        computePass.end();
+
+        // Render to canvas
+        const renderPass = commandEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: context.getCurrentTexture().createView(),
+                loadOp: "clear",
+                storeOp: "store",
+                clearValue: { r: 0, g: 0, b: 0, a: 1 }
+            }]
+        });
+        renderPass.setPipeline(renderPipeline);
+        renderPass.setBindGroup(0, renderBindGroup);
+        renderPass.draw(4);
+        renderPass.end();
+
+        device.queue.submit([commandEncoder.finish()]);
+    }
+
+    const observer = new ResizeObserver(entries => {
+        for (const entry of entries) {
+            const canvas = entry.target as HTMLCanvasElement;
+            const width = entry.contentBoxSize[0].inlineSize;
+            const height = entry.contentBoxSize[0].blockSize;
+            canvas.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
+            canvas.height = Math.max(1, Math.min(height, device.limits.maxTextureDimension2D));
+
+            // Update context configuration
+            context.configure({
+                device,
+                format: presentationFormat,
+                size: [canvas.width, canvas.height]
+            });
+
+            // Recreate compute shader with new size
+            textureSize = { width: canvas.width, height: canvas.height };
+            computeShader = createComputeShader(device, textureSize);
+
+            // Update bind groups
+            updateBindGroups();
+
+            // Re-render
+            render();
+        }
+    });
+
+    observer.observe(canvas);
+
+    // Initial render
+    render();
 }
 
 main().catch(e => {
