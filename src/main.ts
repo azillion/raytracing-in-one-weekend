@@ -78,7 +78,7 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 let color = vec4<f32>(uv, 0.0, 1.0);
 
                 let pixel_center = pixel_00 + (f32(coords.x) * pixel_u) + (f32(coords.y) * pixel_v);
-                let ray = createRay(pixel_center.xy);
+                let ray = Ray(camera_origin, pixel_center - camera_origin);
                 let pixel_color = rayColor(ray);
                 
                 textureStore(output, vec2<i32>(coords), vec4<f32>(pixel_color, 1.0));
