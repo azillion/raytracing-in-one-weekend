@@ -27,11 +27,47 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
     const module = device.createShaderModule({
         label: "Compute shader",
         code: `
+            struct Ray {
+                origin: vec3<f32>,
+                direction: vec3<f32>
+            }
+
+            fn createRay(uv: vec2<f32>) -> Ray {
+                let aspectRatio = f32(textureDimensions(output).x) / f32(textureDimensions(output).y);
+                let origin = vec3<f32>(0.0, 0.0, 0.0);
+                let direction = vec3<f32>(uv.x * aspectRatio, uv.y, -1.0);
+                return Ray(origin, normalize(direction));
+            }
+
+           fn rayColor(ray: Ray) -> vec3<f32> {
+               let unit_direction = normalize(ray.direction);
+               let t = 0.5 * (unit_direction.y + 1.0);
+               return (1.0 - t) * vec3<f32>(1.0, 1.0, 1.0) + t * vec3<f32>(0.5, 0.7, 1.0);
+           } 
+
+            fn rayAt(ray: Ray, t: f32) -> vec3<f32> {
+                return ray.origin + ray.direction * t;
+            }
+            
             @group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
 
             @compute @workgroup_size(8, 8)
             fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 let dims = textureDimensions(output);
+                let focal_length = 1.0;
+                let viewport_height = 2.0;
+                let viewport_width = viewport_height * f32(dims.x) / f32(dims.y);
+                let camera_origin = vec3<f32>(0.0, 0.0, 0.0);
+
+                let viewport_u = vec3<f32>(viewport_width, 0.0, 0.0);
+                let viewport_v = vec3<f32>(0.0, -viewport_height, 0.0);
+
+                let pixel_u = viewport_u / f32(dims.x);
+                let pixel_v = viewport_v / f32(dims.y);
+
+                let viewport_upper_left = camera_origin - vec3<f32>(0.0, 0.0, focal_length) - viewport_u / 2.0 + viewport_v / 2.0;
+                let pixel_00 = viewport_upper_left + 0.5 * (pixel_u + pixel_v);
+
                 let coords = vec2<u32>(id.xy);
                 
                 if (coords.x >= dims.x || coords.y >= dims.y) {
@@ -40,8 +76,12 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
 
                 let uv = vec2<f32>(coords) / vec2<f32>(dims);
                 let color = vec4<f32>(uv, 0.0, 1.0);
+
+                let pixel_center = pixel_00 + (f32(coords.x) * pixel_u) + (f32(coords.y) * pixel_v);
+                let ray = createRay(pixel_center.xy);
+                let pixel_color = rayColor(ray);
                 
-                textureStore(output, vec2<i32>(coords), color);
+                textureStore(output, vec2<i32>(coords), vec4<f32>(pixel_color, 1.0));
             } 
         `
     });
@@ -134,8 +174,9 @@ async function main() {
     const canvas = document.getElementById("canvas") as HTMLCanvasElement;
     const { device, context, presentationFormat } = await initWebGPU(canvas);
 
-    const width = canvas.getBoundingClientRect().width;
-    const height = canvas.getBoundingClientRect().height;
+    const width = 400;
+    const aspectRation = 16.0 / 9.0;
+    const height = Math.floor(width / aspectRation);
     canvas.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
     canvas.height = Math.max(1, Math.min(height, device.limits.maxTextureDimension2D));
     let textureSize = { width: canvas.width, height: canvas.height };
@@ -192,8 +233,6 @@ async function main() {
     const observer = new ResizeObserver(entries => {
         for (const entry of entries) {
             const canvas = entry.target as HTMLCanvasElement;
-            const width = entry.contentBoxSize[0].inlineSize;
-            const height = entry.contentBoxSize[0].blockSize;
             canvas.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
             canvas.height = Math.max(1, Math.min(height, device.limits.maxTextureDimension2D));
 
