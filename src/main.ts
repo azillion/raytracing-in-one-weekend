@@ -39,11 +39,11 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 return Ray(origin, normalize(direction));
             }
 
-           fn rayColor(ray: Ray) -> vec3<f32> {
-               let unit_direction = normalize(ray.direction);
-               let t = 0.5 * (unit_direction.y + 1.0);
-               return (1.0 - t) * vec3<f32>(1.0, 1.0, 1.0) + t * vec3<f32>(0.5, 0.7, 1.0);
-           } 
+            fn rayColor(ray: Ray) -> vec3<f32> {
+                let unit_direction = normalize(ray.direction);
+                let t = 0.5 * (unit_direction.y + 1.0);
+                return (1.0 - t) * vec3<f32>(1.0, 1.0, 1.0) + t * vec3<f32>(0.5, 0.7, 1.0);
+            }
 
             fn rayAt(ray: Ray, t: f32) -> vec3<f32> {
                 return ray.origin + ray.direction * t;
@@ -54,31 +54,14 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
             @compute @workgroup_size(8, 8)
             fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 let dims = textureDimensions(output);
-                let focal_length = 1.0;
-                let viewport_height = 2.0;
-                let viewport_width = viewport_height * f32(dims.x) / f32(dims.y);
-                let camera_origin = vec3<f32>(0.0, 0.0, 0.0);
-
-                let viewport_u = vec3<f32>(viewport_width, 0.0, 0.0);
-                let viewport_v = vec3<f32>(0.0, -viewport_height, 0.0);
-
-                let pixel_u = viewport_u / f32(dims.x);
-                let pixel_v = viewport_v / f32(dims.y);
-
-                let viewport_upper_left = camera_origin - vec3<f32>(0.0, 0.0, focal_length) - viewport_u / 2.0 + viewport_v / 2.0;
-                let pixel_00 = viewport_upper_left + 0.5 * (pixel_u + pixel_v);
-
                 let coords = vec2<u32>(id.xy);
                 
                 if (coords.x >= dims.x || coords.y >= dims.y) {
                     return;
                 }
 
-                let uv = vec2<f32>(coords) / vec2<f32>(dims);
-                let color = vec4<f32>(uv, 0.0, 1.0);
-
-                let pixel_center = pixel_00 + (f32(coords.x) * pixel_u) + (f32(coords.y) * pixel_v);
-                let ray = Ray(camera_origin, pixel_center - camera_origin);
+                let uv = (vec2<f32>(coords) + 0.5) / vec2<f32>(dims) * 2.0 - 1.0;
+                let ray = createRay(uv);
                 let pixel_color = rayColor(ray);
                 
                 textureStore(output, vec2<i32>(coords), vec4<f32>(pixel_color, 1.0));
@@ -120,27 +103,25 @@ function createRenderPipeline(device: GPUDevice, format: GPUTextureFormat) {
                 @location(0) uv: vec2<f32>,
             }
 
-            @vertex
-            fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-                var pos = array<vec2<f32>, 4>(
-                    vec2<f32>(-1.0, -1.0),
-                    vec2<f32>(1.0, -1.0),
-                    vec2<f32>(-1.0, 1.0),
-                    vec2<f32>(1.0, 1.0)
-                );
-
-                var uv = array<vec2<f32>, 4>(
-                    vec2<f32>(0.0, 1.0),
-                    vec2<f32>(1.0, 1.0),
-                    vec2<f32>(0.0, 0.0),
-                    vec2<f32>(1.0, 0.0)
-                );
-
-                var output: VertexOutput;
-                output.position = vec4<f32>(pos[vertexIndex], 0.0, 1.0);
-                output.uv = uv[vertexIndex];
-                return output;
-            }
+           @vertex
+           fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+               var pos = array<vec2<f32>, 4>(
+                   vec2<f32>(-1.0, -1.0),
+                   vec2<f32>(1.0, -1.0),
+                   vec2<f32>(-1.0, 1.0),
+                   vec2<f32>(1.0, 1.0)
+               );
+               var uv = array<vec2<f32>, 4>(
+                   vec2<f32>(0.0, 0.0),  // Changed from (0.0, 1.0)
+                   vec2<f32>(1.0, 0.0),  // Changed from (1.0, 1.0)
+                   vec2<f32>(0.0, 1.0),  // Changed from (0.0, 0.0)
+                   vec2<f32>(1.0, 1.0)   // Changed from (1.0, 0.0)
+               );
+               var output: VertexOutput;
+               output.position = vec4<f32>(pos[vertexIndex], 0.0, 1.0);
+               output.uv = uv[vertexIndex];
+               return output;
+           } 
 
             @group(0) @binding(0) var textureSampler: sampler;
             @group(0) @binding(1) var inputTexture: texture_2d<f32>;
