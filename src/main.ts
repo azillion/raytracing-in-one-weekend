@@ -12,7 +12,16 @@ async function main() {
     if (!device) {
         throw Error("Couldn't request WebGPU device.");
     }
-    console.log(device);
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    const context = canvas.getContext("webgpu") as any;
+    if (!context) {
+        throw Error("WebGPU context not supported.");
+    }
+    const presentationFormat = navigator.gpu?.getPreferredFormat(adapter);
+    context.configure({
+        device,
+        format: presentationFormat,
+    });
 }
 
 try {
