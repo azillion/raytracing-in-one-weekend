@@ -65,13 +65,13 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
             fn hit_sphere(sphere: Sphere, r: Ray) -> f32 {
                 let oc = sphere.center - r.origin;
                 let a = dot(r.direction, r.direction);
-                let b = -2.0 * dot(r.direction, oc);
+                let h = dot(r.direction, oc);
                 let c = dot(oc, oc) - sphere.radius * sphere.radius;
-                let discriminant = b * b - 4.0 * a * c;
+                let discriminant = h * h - a * c;
                 if (discriminant < 0.0) {
                     return -1.0;
                 } else {
-                    return (-b - sqrt(discriminant)) / (2.0 * a);
+                    return (h - sqrt(discriminant)) / a;
                 }
             }
             
