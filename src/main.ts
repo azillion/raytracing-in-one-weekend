@@ -1,7 +1,6 @@
 import "./style.css";
 
 export async function initWebGPU(canvas: HTMLCanvasElement) {
-    const navigator: any = window.navigator;
     if (!navigator.gpu) {
         throw new Error("WebGPU not supported on this browser.");
     }
@@ -44,13 +43,14 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
             }
 
             fn rayColor(ray: Ray) -> vec3<f32> {
-                if (hit_sphere(Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5), ray)) {
-                    return vec3<f32>(1.0, 0.0, 0.0);
+                let t = hit_sphere(Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5), ray);
+                if (t > 0.0) {
+                    let N = normalize(rayAt(ray, t) - vec3<f32>(0.0, 0.0, -1.0));
+                    return 0.5 * vec3<f32>(N.x + 1.0, N.y + 1.0, N.z + 1.0);
                 }
-
                 let unit_direction = normalize(ray.direction);
-                let t = 0.5 * (unit_direction.y + 1.0);
-                return lerp(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(0.5, 0.7, 1.0), t);
+                let a = 0.5 * (unit_direction.y + 1.0);
+                return lerp(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(0.5, 0.7, 1.0), a);
             }
 
             fn rayAt(ray: Ray, t: f32) -> vec3<f32> {
@@ -62,13 +62,17 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 radius: f32,
             }
 
-            fn hit_sphere(sphere: Sphere, r: Ray) -> bool {
+            fn hit_sphere(sphere: Sphere, r: Ray) -> f32 {
                 let oc = sphere.center - r.origin;
                 let a = dot(r.direction, r.direction);
                 let b = -2.0 * dot(r.direction, oc);
                 let c = dot(oc, oc) - sphere.radius * sphere.radius;
                 let discriminant = b * b - 4.0 * a * c;
-                return discriminant >= 0.0;
+                if (discriminant < 0.0) {
+                    return -1.0;
+                } else {
+                    return (-b - sqrt(discriminant)) / (2.0 * a);
+                }
             }
             
             @group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
