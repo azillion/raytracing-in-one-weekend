@@ -22,10 +22,80 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
     return { device, context, presentationFormat };
 }
 
+const hittableShapesShader = `
+struct Sphere {
+    center: vec3<f32>,
+    radius: f32,
+}
+
+struct HitRecord {
+    p: vec3<f32>,
+    normal: vec3<f32>,
+    t: f32,
+    hit: bool,
+    front_face: bool,
+}
+
+struct FaceNormalRecord {
+    front_face: bool,
+    normal: vec3<f32>,
+}
+
+fn setFaceNormal(rec: HitRecord, r: Ray, outwardNormal: vec3<f32>) -> FaceNormalRecord {
+    var newRec: FaceNormalRecord;
+    let frontFaceDirections = dot(r.direction, outwardNormal);
+    if (frontFaceDirections < 0.0) {
+        newRec.front_face = true;
+        newRec.normal = outwardNormal;
+    } else {
+        newRec.front_face = false;
+        newRec.normal = -outwardNormal;
+    }
+    return newRec;
+}
+
+fn hit_sphere(sphere: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32) -> HitRecord {
+    var rec: HitRecord;
+    rec.hit = false;
+
+    let oc = sphere.center - r.origin;
+    let a = dot(r.direction, r.direction);
+    let h = dot(r.direction, oc);
+    let c = dot(oc, oc) - sphere.radius * sphere.radius;
+
+    let discriminant = h * h - a * c;
+    if (discriminant < 0.0) {
+        return rec;
+    }
+
+    let sqrtd = sqrt(discriminant);
+
+    // Find the nearest root that lies in the acceptable range.
+    var root = (h - sqrtd) / a;
+    if (root <= ray_tmin || ray_tmax <= root) {
+        root = (h + sqrtd) / a;
+        if (root <= ray_tmin || ray_tmax <= root) {
+            return rec;
+        }
+    }
+
+    rec.t = root;
+    rec.p = rayAt(r, rec.t);
+    rec.normal = (rec.p - sphere.center) / sphere.radius;
+    let faceNormalRec = setFaceNormal(rec, r, rec.normal);
+    rec.front_face = faceNormalRec.front_face;
+    rec.normal = faceNormalRec.normal;
+    rec.hit = true;
+
+    return rec;
+}
+`;
+
 function createComputeShader(device: GPUDevice, textureSize: { width: number, height: number }) {
     const module = device.createShaderModule({
         label: "Compute shader",
         code: `
+            ${hittableShapesShader}
             struct Ray {
                 origin: vec3<f32>,
                 direction: vec3<f32>
@@ -43,9 +113,9 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
             }
 
             fn rayColor(ray: Ray) -> vec3<f32> {
-                let t = hit_sphere(Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5), ray);
-                if (t > 0.0) {
-                    let N = normalize(rayAt(ray, t) - vec3<f32>(0.0, 0.0, -1.0));
+                let rec = hit_sphere(Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5), ray, 0.0, 10000.0);
+                if (rec.t > 0.0) {
+                    let N = normalize(rayAt(ray, rec.t) - vec3<f32>(0.0, 0.0, -1.0));
                     return 0.5 * vec3<f32>(N.x + 1.0, N.y + 1.0, N.z + 1.0);
                 }
                 let unit_direction = normalize(ray.direction);
@@ -57,24 +127,6 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 return ray.origin + ray.direction * t;
             }
 
-            struct Sphere {
-                center: vec3<f32>,
-                radius: f32,
-            }
-
-            fn hit_sphere(sphere: Sphere, r: Ray) -> f32 {
-                let oc = sphere.center - r.origin;
-                let a = dot(r.direction, r.direction);
-                let h = dot(r.direction, oc);
-                let c = dot(oc, oc) - sphere.radius * sphere.radius;
-                let discriminant = h * h - a * c;
-                if (discriminant < 0.0) {
-                    return -1.0;
-                } else {
-                    return (h - sqrt(discriminant)) / a;
-                }
-            }
-            
             @group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
 
             @compute @workgroup_size(8, 8)
