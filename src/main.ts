@@ -24,7 +24,7 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
 
 const constants = `
 const PI: f32 = 3.1415926535897932385;
-const INFINITY: f32 = 1e10;
+const INFINITY: f32 = 1e38;
 `;
 
 const helpers = `
@@ -35,6 +35,32 @@ fn lerp(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> {
 fn degreesToRadians(degrees: f32) -> f32 {
     return degrees * PI / 180.0;
 }
+`;
+
+const intervalShader = `
+struct Interval {
+    min: f32,
+    max: f32,
+}
+
+fn createInterval(min: f32, max: f32) -> Interval {
+    return Interval(min, max);
+}
+
+fn intervalSize(i: Interval) -> f32 {
+    return i.max - i.min;
+}
+
+fn intervalContains(i: Interval, x: f32) -> bool {
+    return i.min <= x && x <= i.max;
+}
+
+fn intervalSurrounds(i: Interval, x: f32) -> bool {
+    return i.min < x && x < i.max;
+}
+
+const INTERVAL_EMPTY: Interval = Interval(INFINITY, -INFINITY);
+const INTERVAL_UNIVERSE: Interval = Interval(-INFINITY, INFINITY);
 `;
 
 const hittableShapesShader = `
@@ -69,7 +95,7 @@ fn setFaceNormal(rec: HitRecord, r: Ray, outwardNormal: vec3<f32>) -> FaceNormal
     return newRec;
 }
 
-fn hit_sphere(sphere: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32) -> HitRecord {
+fn hit_sphere(sphere: Sphere, r: Ray, ray_t: Interval) -> HitRecord {
     var rec: HitRecord;
     rec.hit = false;
 
@@ -87,9 +113,9 @@ fn hit_sphere(sphere: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32) -> HitRecord
 
     // Find the nearest root that lies in the acceptable range.
     var root = (h - sqrtd) / a;
-    if (root <= ray_tmin || ray_tmax <= root) {
+    if (!intervalContains(ray_t, root)) {
         root = (h + sqrtd) / a;
-        if (root <= ray_tmin || ray_tmax <= root) {
+        if (!intervalContains(ray_t, root)) {
             return rec;
         }
     }
@@ -105,13 +131,13 @@ fn hit_sphere(sphere: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32) -> HitRecord
     return rec;
 }
 
-fn hit_spheres(r: Ray, ray_tmin: f32, ray_tmax: f32) -> HitRecord {
-    var closest_so_far = ray_tmax;
+fn hit_spheres(r: Ray, ray_t: Interval) -> HitRecord {
+    var closest_so_far = ray_t.max;
     var rec: HitRecord;
     rec.hit = false;
 
-    for (var i = 0u; i < 3u; i++) { 
-        let sphere_rec = hit_sphere(spheres[i], r, ray_tmin, closest_so_far);
+    for (var i = 0u; i < 2u; i++) { 
+        let sphere_rec = hit_sphere(spheres[i], r, createInterval(ray_t.min, closest_so_far));
         if (sphere_rec.hit) {
             closest_so_far = sphere_rec.t;
             rec = sphere_rec;
@@ -122,22 +148,52 @@ fn hit_spheres(r: Ray, ray_tmin: f32, ray_tmax: f32) -> HitRecord {
 }
 `;
 
+const cameraShader = `
+struct Camera {
+    origin: vec3<f32>,
+    lower_left_corner: vec3<f32>,
+    horizontal: vec3<f32>,
+    vertical: vec3<f32>,
+}
+
+fn createCamera(aspect_ratio: f32) -> Camera {
+    let viewport_height = 2.0;
+    let viewport_width = aspect_ratio * viewport_height;
+    let focal_length = 1.0;
+
+    let origin = vec3<f32>(0.0, 0.0, 0.0);
+    let horizontal = vec3<f32>(viewport_width, 0.0, 0.0);
+    let vertical = vec3<f32>(0.0, viewport_height, 0.0);
+    let lower_left_corner = origin - horizontal/2.0 - vertical/2.0 - vec3<f32>(0.0, 0.0, focal_length);
+
+    return Camera(origin, lower_left_corner, horizontal, vertical);
+}
+
+fn getRay(camera: Camera, u: f32, v: f32) -> Ray {
+    return Ray(
+        camera.origin,
+        camera.lower_left_corner + u*camera.horizontal + v*camera.vertical - camera.origin
+    );
+}
+`;
+
 function createComputeShader(device: GPUDevice, textureSize: { width: number, height: number }) {
     const module = device.createShaderModule({
         label: "Compute shader",
         code: `
             ${constants}
             ${helpers}
+            ${intervalShader}
             ${hittableShapesShader}
+            ${cameraShader}
             struct Ray {
                 origin: vec3<f32>,
                 direction: vec3<f32>
             }
 
-            const spheres = array<Sphere, 3>(
+            const spheres = array<Sphere, 2>(
                 Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5),
-                Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0),
-                Sphere(vec3<f32>(1.0, 0.0, -1.0), 0.5)
+                Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0)
             );
 
             fn createRay(uv: vec2<f32>) -> Ray {
@@ -148,14 +204,14 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
             }
 
             fn rayColor(ray: Ray) -> vec3<f32> {
-                let rec = hit_spheres(ray, 0.0, 10000.0);
+                let rec = hit_spheres(ray, createInterval(0.001, INFINITY));
                 if (rec.hit) {
                     return 0.5 * (rec.normal + vec3<f32>(1.0, 1.0, 1.0));
                 }
                 let unit_direction = normalize(ray.direction);
                 let a = 0.5 * (unit_direction.y + 1.0);
                 return lerp(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(0.5, 0.7, 1.0), a);
-            } 
+            }
 
             fn rayAt(ray: Ray, t: f32) -> vec3<f32> {
                 return ray.origin + ray.direction * t;
@@ -172,9 +228,13 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                     return;
                 }
 
-                let uv = (vec2<f32>(coords) + 0.5) / vec2<f32>(dims) * 2.0 - 1.0;
-                let ray = createRay(uv);
-                let pixel_color = rayColor(ray);
+                let aspect_ratio = f32(dims.x) / f32(dims.y);
+                let camera = createCamera(aspect_ratio);
+
+                let u = (f32(coords.x) + 0.5) / f32(dims.x);
+                let v = (f32(coords.y) + 0.5) / f32(dims.y);
+                let ray = getRay(camera, u, v);
+                let pixel_color = rayColor(ray); 
                 
                 textureStore(output, vec2<i32>(coords), vec4<f32>(pixel_color, 1.0));
             }
