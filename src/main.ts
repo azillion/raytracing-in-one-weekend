@@ -22,6 +22,12 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
     return { device, context, presentationFormat };
 }
 
+const helpers = `
+fn lerp(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> {
+    return a * (1.0 - t) + b * t;
+}
+`;
+
 const hittableShapesShader = `
 struct Sphere {
     center: vec3<f32>,
@@ -89,17 +95,40 @@ fn hit_sphere(sphere: Sphere, r: Ray, ray_tmin: f32, ray_tmax: f32) -> HitRecord
 
     return rec;
 }
+
+fn hit_spheres(r: Ray, ray_tmin: f32, ray_tmax: f32) -> HitRecord {
+    var closest_so_far = ray_tmax;
+    var rec: HitRecord;
+    rec.hit = false;
+
+    for (var i = 0u; i < 3u; i++) { 
+        let sphere_rec = hit_sphere(spheres[i], r, ray_tmin, closest_so_far);
+        if (sphere_rec.hit) {
+            closest_so_far = sphere_rec.t;
+            rec = sphere_rec;
+        }
+    }
+
+    return rec;
+}
 `;
 
 function createComputeShader(device: GPUDevice, textureSize: { width: number, height: number }) {
     const module = device.createShaderModule({
         label: "Compute shader",
         code: `
+            ${helpers}
             ${hittableShapesShader}
             struct Ray {
                 origin: vec3<f32>,
                 direction: vec3<f32>
             }
+
+            const spheres = array<Sphere, 3>(
+                Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5),
+                Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0),
+                Sphere(vec3<f32>(1.0, 0.0, -1.0), 0.5)
+            );
 
             fn createRay(uv: vec2<f32>) -> Ray {
                 let aspectRatio = f32(textureDimensions(output).x) / f32(textureDimensions(output).y);
@@ -108,20 +137,15 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 return Ray(origin, normalize(direction));
             }
 
-            fn lerp(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> {
-                return a * (1.0 - t) + b * t;
-            }
-
             fn rayColor(ray: Ray) -> vec3<f32> {
-                let rec = hit_sphere(Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5), ray, 0.0, 10000.0);
-                if (rec.t > 0.0) {
-                    let N = normalize(rayAt(ray, rec.t) - vec3<f32>(0.0, 0.0, -1.0));
-                    return 0.5 * vec3<f32>(N.x + 1.0, N.y + 1.0, N.z + 1.0);
+                let rec = hit_spheres(ray, 0.0, 10000.0);
+                if (rec.hit) {
+                    return 0.5 * (rec.normal + vec3<f32>(1.0, 1.0, 1.0));
                 }
                 let unit_direction = normalize(ray.direction);
                 let a = 0.5 * (unit_direction.y + 1.0);
                 return lerp(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(0.5, 0.7, 1.0), a);
-            }
+            } 
 
             fn rayAt(ray: Ray, t: f32) -> vec3<f32> {
                 return ray.origin + ray.direction * t;
@@ -233,6 +257,7 @@ async function main() {
     const canvas = document.getElementById("canvas") as HTMLCanvasElement;
     const { device, context, presentationFormat } = await initWebGPU(canvas);
 
+    // for now we will hardcode the canvas size
     const width = 400;
     const aspectRation = 16.0 / 9.0;
     const height = Math.floor(width / aspectRation);
@@ -310,14 +335,18 @@ async function main() {
             updateBindGroups();
 
             // Re-render
+            const renderTime = performance.now();
             render();
+            console.log("Rerender time:", performance.now() - renderTime);
         }
     });
 
     observer.observe(canvas);
 
     // Initial render
+    let renderTime = performance.now();
     render();
+    console.log("Initial render time:", performance.now() - renderTime);
 }
 
 main().catch(e => {
