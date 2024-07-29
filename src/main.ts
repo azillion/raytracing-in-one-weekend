@@ -22,9 +22,18 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
     return { device, context, presentationFormat };
 }
 
+const constants = `
+const PI: f32 = 3.1415926535897932385;
+const INFINITY: f32 = 1e10;
+`;
+
 const helpers = `
 fn lerp(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> {
     return a * (1.0 - t) + b * t;
+}
+
+fn degreesToRadians(degrees: f32) -> f32 {
+    return degrees * PI / 180.0;
 }
 `;
 
@@ -117,6 +126,7 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
     const module = device.createShaderModule({
         label: "Compute shader",
         code: `
+            ${constants}
             ${helpers}
             ${hittableShapesShader}
             struct Ray {
