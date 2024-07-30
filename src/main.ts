@@ -23,11 +23,14 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
     return { device, context, presentationFormat };
 }
 
+const NUM_SPHERES = 30;
+
 const constants = `
 const PI: f32 = 3.1415926535897932385;
 const INFINITY: f32 = 1e38;
-const SEED: vec2<f32> = vec2<f32>(69.69, 4.20);
-const MAX_DEPTH: u32 = 50;
+const SEED: vec2<f32> = vec2<f32>(69.68, 4.20);
+const MAX_DEPTH: u32 = 100;
+const NUM_SPHERES: u32 = ${NUM_SPHERES};
 `;
 
 const helpers = `
@@ -71,6 +74,17 @@ fn randInUnitSphere(seed: vec2<u32>) -> vec3<f32> {
     loop {
         let p = randVec3MinMax(tempseed, -1.0, 1.0);
         if length(p) < 1.0 {
+            return p;
+        }
+        tempseed = vec2<u32>(hash(tempseed), hash(tempseed + vec2<u32>(1u, 1u)));
+    }
+}
+
+fn randInUnitDisk(seed: vec2<u32>) -> vec3<f32> {
+    var tempseed = seed;
+    loop {
+        let p = vec3<f32>(randMinMax(tempseed, -1.0, 1.0), randMinMax(tempseed + vec2<u32>(1u, 0u), -1.0, 1.0), 0.0);
+        if dot(p, p) < 1.0 {
             return p;
         }
         tempseed = vec2<u32>(hash(tempseed), hash(tempseed + vec2<u32>(1u, 1u)));
@@ -271,13 +285,13 @@ fn hit_sphere(sphere: Sphere, r: Ray, ray_t: Interval) -> HitRecord {
     return rec;
 }
 
-fn hit_spheres(r: Ray, ray_t: Interval) -> HitRecord {
+fn hit_spheres(r: Ray, world: array<Sphere, NUM_SPHERES>, ray_t: Interval) -> HitRecord {
     var closest_so_far = ray_t.maxI;
     var rec: HitRecord;
     rec.hit = false;
 
-    for (var i = 0u; i < 5u; i++) { 
-        let sphere_rec = hit_sphere(spheres[i], r, createInterval(ray_t.minI, closest_so_far));
+    for (var i = 0u; i < NUM_SPHERES; i++) { 
+        let sphere_rec = hit_sphere(world[i], r, createInterval(ray_t.minI, closest_so_far));
         if (sphere_rec.hit) {
             closest_so_far = sphere_rec.t;
             rec = sphere_rec;
@@ -299,19 +313,28 @@ struct Camera {
     lookfrom: vec3<f32>,
     lookat: vec3<f32>,
     vup: vec3<f32>,
+    defocus_angle: f32,
+    focus_distance: f32,
+    u: vec3<f32>,
+    v: vec3<f32>,
+    w: vec3<f32>,
+    defocus_disk_u: vec3<f32>,
+    defocus_disk_v: vec3<f32>,
 }
 
 fn createCamera(aspect_ratio: f32) -> Camera {
+    let samples_per_pixel: u32 = 200;
     let vfov = 20.0;
-    let lookfrom = vec3<f32>(-2.0, 2.0, 1.0);
-    let lookat = vec3<f32>(0.0, 0.0, -1.0);
+    let lookfrom = vec3<f32>(13.0, 2.0, 3.0);
+    let lookat = vec3<f32>(0.0, 0.0, 0.0);
     let vup = vec3<f32>(0.0, 1.0, 0.0);
-    let focal_length = 1.0;
+    let defocus_angle = 0.6;
+    let focus_distance = 10.0;
+
     let theta = degreesToRadians(vfov);
     let h = tan(theta / 2.0);
-    let viewport_height = 2.0 * h * focal_length;
+    let viewport_height = 2.0 * h * focus_distance;
     let viewport_width = aspect_ratio * viewport_height;
-    let samples_per_pixel: u32 = 200;
 
     let w = normalize(lookfrom - lookat);
     let u = normalize(cross(vup, w));
@@ -320,15 +343,27 @@ fn createCamera(aspect_ratio: f32) -> Camera {
     let origin = lookfrom;
     let horizontal = viewport_width * u;
     let vertical = viewport_height * v;
-    let lower_left_corner = origin - horizontal / 2.0 - vertical / 2.0 - w;
+    let lower_left_corner = origin - horizontal / 2.0 - vertical / 2.0 - focus_distance * w;
 
-    return Camera(origin, lower_left_corner, horizontal, vertical, samples_per_pixel, vfov, lookfrom, lookat, vup);
+    let defocus_radius = focus_distance * tan(degreesToRadians(defocus_angle / 2.0));
+    let defocus_disk_u = u * defocus_radius;
+    let defocus_disk_v = v * defocus_radius;
+
+    return Camera(origin, lower_left_corner, horizontal, vertical, 
+                  samples_per_pixel, vfov, lookfrom, lookat, vup, 
+                  defocus_angle, focus_distance, u, v, w, defocus_disk_u, defocus_disk_v);
 }
 
-fn getRay(camera: Camera, u: f32, v: f32) -> Ray {
+fn getRay(camera: Camera, s: f32, t: f32, seed: vec2<u32>) -> Ray {
+    var rd: vec3<f32> = camera.origin;  // This should be vec3<f32>(0.0, 0.0, 0.0)
+    if (camera.defocus_angle > 0.0) {
+        let p = randInUnitDisk(seed);
+        rd = (camera.defocus_disk_u * p.x + camera.defocus_disk_v * p.y);
+    }
+    let offset = camera.u * rd.x + camera.v * rd.y;
     return Ray(
-        camera.origin,
-        camera.lower_left_corner + u*camera.horizontal + v*camera.vertical - camera.origin
+        camera.origin + offset,
+        camera.lower_left_corner + s*camera.horizontal + t*camera.vertical - camera.origin - offset
     );
 }
 `;
@@ -359,15 +394,15 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
             // const TEMP_MATERIAL_LEFT: Material = Material(vec3<f32>(0.0, 0.0, 1.0), 0.0, 0.0, 0);
             // const TEMP_MATERIAL_RIGHT: Material = Material(vec3<f32>(1.0, 0.0, 0.0), 0.0, 0.0, 0);
 
-            const spheres = array<Sphere, 5>(
-                Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0, MATERIAL_GROUND),
-                Sphere(vec3<f32>(0.0, 0.0, -1.2), 0.5, MATERIAL_CENTER),
-                Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.5, MATERIAL_LEFT),
-                Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.4, MATERIAL_BUBBLE),
-                Sphere(vec3<f32>(1.0, 0.0, -1.0), 0.5, MATERIAL_RIGHT)
-                //Sphere(vec3<f32>(-R, 0.0, -1.0), R, TEMP_MATERIAL_LEFT),
-                //Sphere(vec3<f32>(R, 0.0, -1.0), R, TEMP_MATERIAL_RIGHT)
-            );
+            // const spheres = array<Sphere, 5>(
+            //     Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0, MATERIAL_GROUND),
+            //     Sphere(vec3<f32>(0.0, 0.0, -1.2), 0.5, MATERIAL_CENTER),
+            //     Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.5, MATERIAL_LEFT),
+            //     Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.4, MATERIAL_BUBBLE),
+            //     Sphere(vec3<f32>(1.0, 0.0, -1.0), 0.5, MATERIAL_RIGHT)
+            //     //Sphere(vec3<f32>(-R, 0.0, -1.0), R, TEMP_MATERIAL_LEFT),
+            //     //Sphere(vec3<f32>(R, 0.0, -1.0), R, TEMP_MATERIAL_RIGHT)
+            // );
 
             fn createRay(uv: vec2<f32>) -> Ray {
                 let aspectRatio = f32(textureDimensions(output).x) / f32(textureDimensions(output).y);
@@ -376,7 +411,7 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 return Ray(origin, normalize(direction));
             }
 
-            fn rayColor(initial_ray: Ray, seed: vec2<u32>) -> vec3<f32> {
+            fn rayColor(initial_ray: Ray, world: array<Sphere, NUM_SPHERES>, seed: vec2<u32>) -> vec3<f32> {
                 var ray = initial_ray;
                 var color = vec3<f32>(1.0, 1.0, 1.0);
                 var current_seed = seed;
@@ -385,7 +420,7 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                     if (depth == MAX_DEPTH - 1) {
                         color *= 0.0;
                     }
-                    let rec = hit_spheres(ray, createInterval(0.001, INFINITY));
+                    let rec = hit_spheres(ray, world, createInterval(0.001, INFINITY));
                     if (rec.hit) {
                         current_seed = vec2<u32>(hash(current_seed), depth);
 
@@ -426,7 +461,52 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 return ray.origin + ray.direction * t;
             }
 
-            @group(0) @binding(0) var output: texture_storage_2d<rgba8unorm, write>;
+            fn createRandomScene() {
+                // Ground
+                spheres[0] = Sphere(
+                    vec3<f32>(0.0, -1000.0, 0.0),
+                    1000.0,
+                    Material(vec3<f32>(0.5, 0.5, 0.5), 0.0, 0.0, 0) // Lambertian
+                );
+
+                // Three large spheres
+                spheres[1] = Sphere(vec3<f32>(0.0, 1.0, 0.0), 1.0, Material(vec3<f32>(1.0), 0.0, 1.5, 2)); // Glass
+                spheres[2] = Sphere(vec3<f32>(-4.0, 1.0, 0.0), 1.0, Material(vec3<f32>(0.4, 0.2, 0.1), 0.0, 0.0, 0)); // Lambertian
+                spheres[3] = Sphere(vec3<f32>(4.0, 1.0, 0.0), 1.0, Material(vec3<f32>(0.7, 0.6, 0.5), 0.0, 0.0, 1)); // Metal
+
+                // Random small spheres
+                for (var i = 4u; i < NUM_SPHERES; i++) {
+                    let choose_mat = rand(vec2<u32>(i, 0u));
+                    let center = vec3<f32>(
+                        randMinMax(vec2<u32>(i, 1u), -4.0, 4.0),
+                        0.2,
+                        randMinMax(vec2<u32>(i, 2u), -4.0, 4.0)
+                    );
+
+                    if (length(center - vec3<f32>(4.0, 0.2, 0.0)) > 0.9) {
+                        if (choose_mat < 0.8) {
+                            // Diffuse
+                            let albedo = randVec3(vec2<u32>(i, 3u)) * randVec3(vec2<u32>(i, 4u));
+                            spheres[i] = Sphere(center, 0.2, Material(albedo, 0.0, 0.0, 0));
+                        } else if (choose_mat < 0.95) {
+                            // Metal
+                            let albedo = randVec3MinMax(vec2<u32>(i, 5u), 0.5, 1.0);
+                            let fuzz = randMinMax(vec2<u32>(i, 6u), 0.0, 0.5);
+                            spheres[i] = Sphere(center, 0.2, Material(albedo, fuzz, 0.0, 1));
+                        } else {
+                            // Glass
+                            spheres[i] = Sphere(center, 0.2, Material(vec3<f32>(1.0), 0.0, 1.5, 2));
+                        }
+                    } else {
+                        // If the position is not valid, create a default sphere
+                        spheres[i] = Sphere(vec3<f32>(0.0), 0.1, Material(vec3<f32>(1.0), 0.0, 0.0, 0));
+                    }
+                }
+            }
+
+
+            @group(0) @binding(0) var<storage, read_write> spheres: array<Sphere, NUM_SPHERES>;
+            @group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
 
             @compute @workgroup_size(8, 8)
             fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -439,14 +519,17 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
 
                 let aspect_ratio = f32(dims.x) / f32(dims.y);
                 let camera = createCamera(aspect_ratio);
+                if (id.x == 0u && id.y == 0u) {
+                    createRandomScene();
+                }
 
                 var pixel_color = vec3<f32>(0.0, 0.0, 0.0);
                 for (var s = 0u; s < camera.samples_per_pixel; s++) {
                     let seed = vec2<u32>(coords.x + dims.x * coords.y, s);
                     let u = (f32(coords.x) + rand(seed)) / f32(dims.x);
                     let v = (f32(coords.y) + rand(seed + vec2<u32>(1u, 1u))) / f32(dims.y); 
-                    let ray = getRay(camera, u, v);
-                    pixel_color += rayColor(ray, seed);
+                    let ray = getRay(camera, u, v, seed);
+                    pixel_color += rayColor(ray, spheres, seed);
                 }
                 
                 pixel_color = sqrt(pixel_color / f32(camera.samples_per_pixel)); // Gamma correction
@@ -465,6 +548,33 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
         }
     });
 
+    // After creating spheresBuffer
+    const sphereData = new Float32Array(NUM_SPHERES * 12); // 8 floats per sphere (3 for center, 1 for radius, 4 for material)
+
+    for (let i = 0; i < NUM_SPHERES; i++) {
+        const offset = i * 12;
+        sphereData[offset] = 0; // center.x
+        sphereData[offset + 1] = 0; // center.y
+        sphereData[offset + 2] = 0; // center.z
+        sphereData[offset + 3] = 1; // radius
+        sphereData[offset + 4] = 1; // material.albedo.r
+        sphereData[offset + 5] = 1; // material.albedo.g
+        sphereData[offset + 6] = 1; // material.albedo.b
+        sphereData[offset + 7] = 0; // material.mat_type
+        sphereData[offset + 8] = 0; // material.fuzziness
+        sphereData[offset + 9] = 1; // material.refraction_index
+        // offset + 10 and offset + 11 are padding and can be left as 0
+    }
+
+    const spheresBuffer = device.createBuffer({
+        size: sphereData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // After creating spheresBuffer
+    // Fill sphereData with your sphere information
+    device.queue.writeBuffer(spheresBuffer, 0, sphereData);
+
     const texture = device.createTexture({
         size: textureSize,
         format: 'rgba8unorm',
@@ -472,9 +582,11 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
     });
 
     const bindGroup = device.createBindGroup({
+        label: "Compute bind group",
         layout: pipeline.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: texture.createView() }
+            { binding: 0, resource: { buffer: spheresBuffer } },
+            { binding: 1, resource: texture.createView() }
         ]
     });
 
@@ -543,7 +655,7 @@ async function main() {
     const { device, context, presentationFormat } = await initWebGPU(canvas);
 
     // for now we will hardcode the canvas size
-    const width = 800;
+    const width = canvas.getBoundingClientRect().width;
     const aspectRation = 16.0 / 9.0;
     const height = Math.floor(width / aspectRation);
     canvas.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
