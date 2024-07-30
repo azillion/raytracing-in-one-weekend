@@ -8,4 +8,4 @@ bun install
 bun run dev
 ```
 
-![Screenshot](https://github.com/azillion/raytracing-in-one-weekend/ray_traced.png)
+![Screenshot](https://github.com/azillion/raytracing-in-one-weekend/blob/main/ray_traced.png?raw=true)
