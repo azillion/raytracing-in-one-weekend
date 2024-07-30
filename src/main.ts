@@ -25,6 +25,7 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
 const constants = `
 const PI: f32 = 3.1415926535897932385;
 const INFINITY: f32 = 1e38;
+const SEED: vec2<f32> = vec2<f32>(69.69, 4.20);
 `;
 
 const helpers = `
@@ -35,12 +36,24 @@ fn lerp(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> {
 fn degreesToRadians(degrees: f32) -> f32 {
     return degrees * PI / 180.0;
 }
+
+fn rand(seed: vec2<f32>) -> f32 {
+    return fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+fn randMinMax(seed: vec2<f32>, min: f32, max: f32) -> f32 {
+    return min + (max - min) * rand(seed);
+}
+
+fn randVec3(seed: vec2<f32>) -> vec3<f32> {
+    return vec3<f32>(rand(seed), rand(seed + 1.0), rand(seed + 2.0));
+}
 `;
 
 const intervalShader = `
 struct Interval {
-    min: f32,
-    max: f32,
+    minI: f32,
+    maxI: f32,
 }
 
 fn createInterval(min: f32, max: f32) -> Interval {
@@ -48,15 +61,19 @@ fn createInterval(min: f32, max: f32) -> Interval {
 }
 
 fn intervalSize(i: Interval) -> f32 {
-    return i.max - i.min;
+    return i.maxI - i.minI;
 }
 
 fn intervalContains(i: Interval, x: f32) -> bool {
-    return i.min <= x && x <= i.max;
+    return i.minI <= x && x <= i.maxI;
 }
 
 fn intervalSurrounds(i: Interval, x: f32) -> bool {
-    return i.min < x && x < i.max;
+    return i.minI < x && x < i.maxI;
+}
+
+fn clampInterval(i: Interval, minI: f32, maxI: f32) -> f32 {
+    return min(max(i.minI, minI), maxI);
 }
 
 const INTERVAL_EMPTY: Interval = Interval(INFINITY, -INFINITY);
@@ -132,12 +149,12 @@ fn hit_sphere(sphere: Sphere, r: Ray, ray_t: Interval) -> HitRecord {
 }
 
 fn hit_spheres(r: Ray, ray_t: Interval) -> HitRecord {
-    var closest_so_far = ray_t.max;
+    var closest_so_far = ray_t.maxI;
     var rec: HitRecord;
     rec.hit = false;
 
     for (var i = 0u; i < 2u; i++) { 
-        let sphere_rec = hit_sphere(spheres[i], r, createInterval(ray_t.min, closest_so_far));
+        let sphere_rec = hit_sphere(spheres[i], r, createInterval(ray_t.minI, closest_so_far));
         if (sphere_rec.hit) {
             closest_so_far = sphere_rec.t;
             rec = sphere_rec;
@@ -154,19 +171,21 @@ struct Camera {
     lower_left_corner: vec3<f32>,
     horizontal: vec3<f32>,
     vertical: vec3<f32>,
+    samples_per_pixel: u32,
 }
 
 fn createCamera(aspect_ratio: f32) -> Camera {
     let viewport_height = 2.0;
     let viewport_width = aspect_ratio * viewport_height;
     let focal_length = 1.0;
+    let samples_per_pixel: u32 = 100;
 
     let origin = vec3<f32>(0.0, 0.0, 0.0);
     let horizontal = vec3<f32>(viewport_width, 0.0, 0.0);
     let vertical = vec3<f32>(0.0, viewport_height, 0.0);
     let lower_left_corner = origin - horizontal/2.0 - vertical/2.0 - vec3<f32>(0.0, 0.0, focal_length);
 
-    return Camera(origin, lower_left_corner, horizontal, vertical);
+    return Camera(origin, lower_left_corner, horizontal, vertical, samples_per_pixel);
 }
 
 fn getRay(camera: Camera, u: f32, v: f32) -> Ray {
@@ -231,10 +250,15 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 let aspect_ratio = f32(dims.x) / f32(dims.y);
                 let camera = createCamera(aspect_ratio);
 
-                let u = (f32(coords.x) + 0.5) / f32(dims.x);
-                let v = (f32(coords.y) + 0.5) / f32(dims.y);
-                let ray = getRay(camera, u, v);
-                let pixel_color = rayColor(ray); 
+                var pixel_color = vec3<f32>(0.0, 0.0, 0.0);
+                for (var s = 0u; s < camera.samples_per_pixel; s++) {
+                    let u = (f32(coords.x) + rand(SEED + vec2<f32>(f32(s), 0.0))) / f32(dims.x);
+                    let v = (f32(coords.y) + rand(SEED + vec2<f32>(0.0, f32(s)))) / f32(dims.y);
+                    let ray = getRay(camera, u, v);
+                    pixel_color += rayColor(ray);
+                }
+                
+                pixel_color = pixel_color / f32(camera.samples_per_pixel); 
                 
                 textureStore(output, vec2<i32>(coords), vec4<f32>(pixel_color, 1.0));
             }
@@ -386,6 +410,7 @@ async function main() {
 
     const observer = new ResizeObserver(entries => {
         for (const entry of entries) {
+            const renderTime = performance.now();
             const canvas = entry.target as HTMLCanvasElement;
             canvas.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
             canvas.height = Math.max(1, Math.min(height, device.limits.maxTextureDimension2D));
@@ -405,7 +430,6 @@ async function main() {
             updateBindGroups();
 
             // Re-render
-            const renderTime = performance.now();
             render();
             console.log("Rerender time:", performance.now() - renderTime);
         }
@@ -414,12 +438,13 @@ async function main() {
     observer.observe(canvas);
 
     // Initial render
-    let renderTime = performance.now();
     render();
-    console.log("Initial render time:", performance.now() - renderTime);
 }
 
-main().catch(e => {
+let renderTime = performance.now();
+main().then(() =>
+    console.log("Total time:", performance.now() - renderTime)
+).catch(e => {
     console.error(e);
     alert(e);
 });
