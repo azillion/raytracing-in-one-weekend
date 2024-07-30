@@ -94,6 +94,20 @@ fn reflect(v: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return v - 2.0 * dot(v, n) * n;
 }
 
+fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
+    // Use Schlick's approximation for reflectance
+    var r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+}
+
+fn refract(uv: vec3<f32>, n: vec3<f32>, etai_over_etat: f32) -> vec3<f32> {
+    let cos_theta = min(dot(-uv, n), 1.0);
+    let r_out_perp = etai_over_etat * (uv + cos_theta * n);
+    let r_out_parallel = -sqrt(abs(1.0 - length(r_out_perp) * length(r_out_perp))) * n;
+    return r_out_perp + r_out_parallel;
+}
+
 fn nearZero(v: vec3<f32>) -> bool {
     let s = 1e-8;
     return (v.x > -s && v.x < s) && (v.y > -s && v.y < s) && (v.z > -s && v.z < s);
@@ -134,12 +148,14 @@ const materialShader = `
 struct Material {
     albedo: vec3<f32>,
     fuzziness: f32,
+    refraction_index: f32,
     mat_type: u32,
 }
 
 struct ScatterRecord {
     scattered: Ray,
     attenuation: vec3<f32>,
+    is_scattered: bool,
 }
 
 fn scatterLambertian(r: Ray, rec: HitRecord, material: Material, seed: vec2<u32>) -> ScatterRecord {
@@ -149,14 +165,38 @@ fn scatterLambertian(r: Ray, rec: HitRecord, material: Material, seed: vec2<u32>
     }
     let scattered = Ray(rec.p, scatter_direction);
     let attenuation = material.albedo;
-    return ScatterRecord(scattered, attenuation);
+    return ScatterRecord(scattered, attenuation, true);
 }
 
 fn scatterMetal(r: Ray, rec: HitRecord, material: Material, seed: vec2<u32>) -> ScatterRecord {
-    let reflected = reflect(r.direction, rec.normal);
-    let scattered = Ray(rec.p, normalize(reflected) + material.fuzziness * randInUnitSphere(seed));
+    let reflected = reflect(normalize(r.direction), rec.normal);
+    let scattered = Ray(rec.p, reflected + material.fuzziness * randInUnitSphere(seed));
     let attenuation = material.albedo;
-    return ScatterRecord(scattered, attenuation);
+    let is_scattered = dot(scattered.direction, rec.normal) > 0.0;
+    return ScatterRecord(scattered, attenuation, is_scattered);
+}
+
+fn scatterDielectric(r: Ray, rec: HitRecord, material: Material, seed: vec2<u32>) -> ScatterRecord {
+    let attenuation = vec3<f32>(1.0, 1.0, 1.0);
+    var refraction_ratio: f32;
+    if (rec.front_face) {
+        refraction_ratio = 1.0 / material.refraction_index;
+    } else {
+        refraction_ratio = material.refraction_index;
+    }
+
+    let unit_direction = normalize(r.direction);
+    let cos_theta = min(dot(-unit_direction, rec.normal), 1.0);
+    let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+    let cannot_refract = refraction_ratio * sin_theta > 1.0;
+    var direction: vec3<f32>;
+    if (cannot_refract || reflectance(cos_theta, refraction_ratio) > rand(seed)) {
+        direction = reflect(unit_direction, rec.normal);
+    } else {
+        direction = refract(unit_direction, rec.normal, refraction_ratio);
+    }
+
+    return ScatterRecord(Ray(rec.p, direction), attenuation, true);
 }
 `;
 
@@ -236,7 +276,7 @@ fn hit_spheres(r: Ray, ray_t: Interval) -> HitRecord {
     var rec: HitRecord;
     rec.hit = false;
 
-    for (var i = 0u; i < 4u; i++) { 
+    for (var i = 0u; i < 5u; i++) { 
         let sphere_rec = hit_sphere(spheres[i], r, createInterval(ray_t.minI, closest_so_far));
         if (sphere_rec.hit) {
             closest_so_far = sphere_rec.t;
@@ -294,15 +334,17 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 direction: vec3<f32>
             }
 
-            const MATERIAL_GROUND: Material = Material(vec3<f32>(0.8, 0.8, 0.0), 0.0, 0);
-            const MATERIAL_CENTER: Material = Material(vec3<f32>(0.1, 0.2, 0.5), 0.0, 0);
-            const MATERIAL_LEFT: Material = Material(vec3<f32>(0.8, 0.8, 0.8), 0.3, 1);
-            const MATERIAL_RIGHT: Material = Material(vec3<f32>(0.8, 0.6, 0.2), 1.0, 1);
+            const MATERIAL_GROUND: Material = Material(vec3<f32>(0.8, 0.8, 0.0), 0.0, 0.0, 0);
+            const MATERIAL_CENTER: Material = Material(vec3<f32>(0.1, 0.2, 0.5), 0.0, 0.0, 0);
+            const MATERIAL_LEFT: Material = Material(vec3<f32>(0.8, 0.8, 0.8), 0.0, 1.5, 2);
+            const MATERIAL_BUBBLE: Material = Material(vec3<f32>(1.0, 1.0, 1.0), 0.0, 1.0/1.5, 2);
+            const MATERIAL_RIGHT: Material = Material(vec3<f32>(0.8, 0.6, 0.2), 1.0, 0.0, 1);
 
-            const spheres = array<Sphere, 4>(
+            const spheres = array<Sphere, 5>(
                 Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0, MATERIAL_GROUND),
-                Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5, MATERIAL_CENTER),
+                Sphere(vec3<f32>(0.0, 0.0, -1.2), 0.5, MATERIAL_CENTER),
                 Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.5, MATERIAL_LEFT),
+                Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.4, MATERIAL_BUBBLE),
                 Sphere(vec3<f32>(1.0, 0.0, -1.0), 0.5, MATERIAL_RIGHT)
             );
 
@@ -329,14 +371,24 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                         //let direction = randomOnHemisphere(rec.normal, current_seed);
                         let direction = rec.normal + randUnitVector(current_seed);
 
+                        var scatterRec: ScatterRecord;
+
                         if (rec.material.mat_type == 0) {
-                            let scatterRec = scatterLambertian(ray, rec, rec.material, current_seed);
-                            ray = scatterRec.scattered;
-                            color *= scatterRec.attenuation;
+                            scatterRec = scatterLambertian(ray, rec, rec.material, current_seed);
                         } else if (rec.material.mat_type == 1) {
-                            let scatterRec = scatterMetal(ray, rec, rec.material, current_seed);
+                            scatterRec = scatterMetal(ray, rec, rec.material, current_seed);
+                        } else if (rec.material.mat_type == 2) {
+                            scatterRec = scatterDielectric(ray, rec, rec.material, current_seed);
+                        } else {
+                            // Handle unknown material type
+                            return vec3<f32>(1.0, 0.0, 1.0); // Magenta for error
+                        }
+
+                        if (scatterRec.is_scattered) {
                             ray = scatterRec.scattered;
                             color *= scatterRec.attenuation;
+                        } else {
+                            return vec3<f32>(0.0, 0.0, 0.0); // Ray was absorbed
                         }
                     } else {
                         let unit_direction = normalize(ray.direction);
