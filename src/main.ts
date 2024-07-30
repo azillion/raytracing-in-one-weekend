@@ -1,4 +1,5 @@
 import "./style.css";
+let renderTime = performance.now();
 
 export async function initWebGPU(canvas: HTMLCanvasElement) {
     if (!navigator.gpu) {
@@ -88,6 +89,15 @@ fn randomOnHemisphere(normal: vec3<f32>, seed: vec2<u32>) -> vec3<f32> {
         return -on_unit_sphere;
     }
 }
+
+fn reflect(v: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    return v - 2.0 * dot(v, n) * n;
+}
+
+fn nearZero(v: vec3<f32>) -> bool {
+    let s = 1e-8;
+    return (v.x > -s && v.x < s) && (v.y > -s && v.y < s) && (v.z > -s && v.z < s);
+}
 `;
 
 const intervalShader = `
@@ -120,10 +130,41 @@ const INTERVAL_EMPTY: Interval = Interval(INFINITY, -INFINITY);
 const INTERVAL_UNIVERSE: Interval = Interval(-INFINITY, INFINITY);
 `;
 
+const materialShader = `
+struct Material {
+    albedo: vec3<f32>,
+    fuzziness: f32,
+    mat_type: u32,
+}
+
+struct ScatterRecord {
+    scattered: Ray,
+    attenuation: vec3<f32>,
+}
+
+fn scatterLambertian(r: Ray, rec: HitRecord, material: Material, seed: vec2<u32>) -> ScatterRecord {
+    var scatter_direction = rec.normal + randUnitVector(seed);
+    if (nearZero(scatter_direction)) {
+        scatter_direction = rec.normal;
+    }
+    let scattered = Ray(rec.p, scatter_direction);
+    let attenuation = material.albedo;
+    return ScatterRecord(scattered, attenuation);
+}
+
+fn scatterMetal(r: Ray, rec: HitRecord, material: Material, seed: vec2<u32>) -> ScatterRecord {
+    let reflected = reflect(r.direction, rec.normal);
+    let scattered = Ray(rec.p, normalize(reflected) + material.fuzziness * randInUnitSphere(seed));
+    let attenuation = material.albedo;
+    return ScatterRecord(scattered, attenuation);
+}
+`;
+
 const hittableShapesShader = `
 struct Sphere {
     center: vec3<f32>,
     radius: f32,
+    material: Material,
 }
 
 struct HitRecord {
@@ -132,6 +173,7 @@ struct HitRecord {
     t: f32,
     hit: bool,
     front_face: bool,
+    material: Material,
 }
 
 struct FaceNormalRecord {
@@ -183,6 +225,7 @@ fn hit_sphere(sphere: Sphere, r: Ray, ray_t: Interval) -> HitRecord {
     let faceNormalRec = setFaceNormal(rec, r, rec.normal);
     rec.front_face = faceNormalRec.front_face;
     rec.normal = faceNormalRec.normal;
+    rec.material = sphere.material;
     rec.hit = true;
 
     return rec;
@@ -193,7 +236,7 @@ fn hit_spheres(r: Ray, ray_t: Interval) -> HitRecord {
     var rec: HitRecord;
     rec.hit = false;
 
-    for (var i = 0u; i < 2u; i++) { 
+    for (var i = 0u; i < 4u; i++) { 
         let sphere_rec = hit_sphere(spheres[i], r, createInterval(ray_t.minI, closest_so_far));
         if (sphere_rec.hit) {
             closest_so_far = sphere_rec.t;
@@ -218,7 +261,7 @@ fn createCamera(aspect_ratio: f32) -> Camera {
     let viewport_height = 2.0;
     let viewport_width = aspect_ratio * viewport_height;
     let focal_length = 1.0;
-    let samples_per_pixel: u32 = 100;
+    let samples_per_pixel: u32 = 200;
 
     let origin = vec3<f32>(0.0, 0.0, 0.0);
     let horizontal = vec3<f32>(viewport_width, 0.0, 0.0);
@@ -243,6 +286,7 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
             ${constants}
             ${helpers}
             ${intervalShader}
+            ${materialShader}
             ${hittableShapesShader}
             ${cameraShader}
             struct Ray {
@@ -250,9 +294,16 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 direction: vec3<f32>
             }
 
-            const spheres = array<Sphere, 2>(
-                Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5),
-                Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0)
+            const MATERIAL_GROUND: Material = Material(vec3<f32>(0.8, 0.8, 0.0), 0.0, 0);
+            const MATERIAL_CENTER: Material = Material(vec3<f32>(0.1, 0.2, 0.5), 0.0, 0);
+            const MATERIAL_LEFT: Material = Material(vec3<f32>(0.8, 0.8, 0.8), 0.3, 1);
+            const MATERIAL_RIGHT: Material = Material(vec3<f32>(0.8, 0.6, 0.2), 1.0, 1);
+
+            const spheres = array<Sphere, 4>(
+                Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0, MATERIAL_GROUND),
+                Sphere(vec3<f32>(0.0, 0.0, -1.0), 0.5, MATERIAL_CENTER),
+                Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.5, MATERIAL_LEFT),
+                Sphere(vec3<f32>(1.0, 0.0, -1.0), 0.5, MATERIAL_RIGHT)
             );
 
             fn createRay(uv: vec2<f32>) -> Ray {
@@ -268,12 +319,25 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 var current_seed = seed;
                 
                 for (var depth = 0u; depth < MAX_DEPTH; depth++) {
+                    if (depth == MAX_DEPTH - 1) {
+                        color *= 0.0;
+                    }
                     let rec = hit_spheres(ray, createInterval(0.001, INFINITY));
                     if (rec.hit) {
                         current_seed = vec2<u32>(hash(current_seed), depth);
-                        let direction = randomOnHemisphere(rec.normal, current_seed);
-                        ray = Ray(rec.p, direction);
-                        color *= 0.5;  // This could be replaced with material-specific reflectivity
+
+                        //let direction = randomOnHemisphere(rec.normal, current_seed);
+                        let direction = rec.normal + randUnitVector(current_seed);
+
+                        if (rec.material.mat_type == 0) {
+                            let scatterRec = scatterLambertian(ray, rec, rec.material, current_seed);
+                            ray = scatterRec.scattered;
+                            color *= scatterRec.attenuation;
+                        } else if (rec.material.mat_type == 1) {
+                            let scatterRec = scatterMetal(ray, rec, rec.material, current_seed);
+                            ray = scatterRec.scattered;
+                            color *= scatterRec.attenuation;
+                        }
                     } else {
                         let unit_direction = normalize(ray.direction);
                         let a = 0.5 * (unit_direction.y + 1.0);
@@ -312,7 +376,7 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                     pixel_color += rayColor(ray, seed);
                 }
                 
-                pixel_color = sqrt(pixel_color / f32(camera.samples_per_pixel)); 
+                pixel_color = sqrt(pixel_color / f32(camera.samples_per_pixel)); // Gamma correction
 
                 textureStore(output, vec2<i32>(coords), vec4<f32>(pixel_color, 1.0));
             }
@@ -495,7 +559,6 @@ async function main() {
     render();
 }
 
-let renderTime = performance.now();
 main().then(() =>
     console.log("Total time:", performance.now() - renderTime)
 ).catch(e => {
