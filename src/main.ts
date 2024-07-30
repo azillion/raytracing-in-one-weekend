@@ -26,6 +26,7 @@ const constants = `
 const PI: f32 = 3.1415926535897932385;
 const INFINITY: f32 = 1e38;
 const SEED: vec2<f32> = vec2<f32>(69.69, 4.20);
+const MAX_DEPTH: u32 = 50;
 `;
 
 const helpers = `
@@ -37,16 +38,55 @@ fn degreesToRadians(degrees: f32) -> f32 {
     return degrees * PI / 180.0;
 }
 
-fn rand(seed: vec2<f32>) -> f32 {
-    return fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+fn hash(seed: vec2<u32>) -> u32 {
+    var state = seed.x;
+    state = state ^ (state << 13u);
+    state = state ^ (state >> 17u);
+    state = state ^ (state << 5u);
+    state = state * 1597334677u;
+    state = state ^ seed.y;
+    state = state * 1597334677u;
+    return state;
 }
 
-fn randMinMax(seed: vec2<f32>, min: f32, max: f32) -> f32 {
+fn rand(seed: vec2<u32>) -> f32 {
+    return f32(hash(seed)) / 4294967295.0;
+}
+
+fn randMinMax(seed: vec2<u32>, min: f32, max: f32) -> f32 {
     return min + (max - min) * rand(seed);
 }
 
-fn randVec3(seed: vec2<f32>) -> vec3<f32> {
-    return vec3<f32>(rand(seed), rand(seed + 1.0), rand(seed + 2.0));
+fn randVec3(seed: vec2<u32>) -> vec3<f32> {
+    return vec3<f32>(rand(seed), rand(seed + vec2<u32>(1u, 0u)), rand(seed + vec2<u32>(0u, 1u)));
+}
+
+fn randVec3MinMax(seed: vec2<u32>, min: f32, max: f32) -> vec3<f32> {
+    return vec3<f32>(randMinMax(seed, min, max), randMinMax(seed + vec2<u32>(1u, 0u), min, max), randMinMax(seed + vec2<u32>(0u, 1u), min, max));
+}
+
+fn randInUnitSphere(seed: vec2<u32>) -> vec3<f32> {
+    var tempseed = seed;
+    loop {
+        let p = randVec3MinMax(tempseed, -1.0, 1.0);
+        if length(p) < 1.0 {
+            return p;
+        }
+        tempseed = vec2<u32>(hash(tempseed), hash(tempseed + vec2<u32>(1u, 1u)));
+    }
+}
+
+fn randUnitVector(seed: vec2<u32>) -> vec3<f32> {
+    return normalize(randInUnitSphere(seed));
+}
+
+fn randomOnHemisphere(normal: vec3<f32>, seed: vec2<u32>) -> vec3<f32> {
+    let on_unit_sphere = randUnitVector(seed);
+    if (dot(on_unit_sphere, normal) > 0.0) { // In the same hemisphere as the normal
+        return on_unit_sphere;
+    } else {
+        return -on_unit_sphere;
+    }
 }
 `;
 
@@ -222,14 +262,27 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
                 return Ray(origin, normalize(direction));
             }
 
-            fn rayColor(ray: Ray) -> vec3<f32> {
-                let rec = hit_spheres(ray, createInterval(0.001, INFINITY));
-                if (rec.hit) {
-                    return 0.5 * (rec.normal + vec3<f32>(1.0, 1.0, 1.0));
+            fn rayColor(initial_ray: Ray, seed: vec2<u32>) -> vec3<f32> {
+                var ray = initial_ray;
+                var color = vec3<f32>(1.0, 1.0, 1.0);
+                var current_seed = seed;
+                
+                for (var depth = 0u; depth < MAX_DEPTH; depth++) {
+                    let rec = hit_spheres(ray, createInterval(0.001, INFINITY));
+                    if (rec.hit) {
+                        current_seed = vec2<u32>(hash(current_seed), depth);
+                        let direction = randomOnHemisphere(rec.normal, current_seed);
+                        ray = Ray(rec.p, direction);
+                        color *= 0.5;  // This could be replaced with material-specific reflectivity
+                    } else {
+                        let unit_direction = normalize(ray.direction);
+                        let a = 0.5 * (unit_direction.y + 1.0);
+                        color *= (1.0 - a) * vec3<f32>(1.0, 1.0, 1.0) + a * vec3<f32>(0.5, 0.7, 1.0);
+                        break;
+                    }
                 }
-                let unit_direction = normalize(ray.direction);
-                let a = 0.5 * (unit_direction.y + 1.0);
-                return lerp(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(0.5, 0.7, 1.0), a);
+                
+                return color;
             }
 
             fn rayAt(ray: Ray, t: f32) -> vec3<f32> {
@@ -252,14 +305,15 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
 
                 var pixel_color = vec3<f32>(0.0, 0.0, 0.0);
                 for (var s = 0u; s < camera.samples_per_pixel; s++) {
-                    let u = (f32(coords.x) + rand(SEED + vec2<f32>(f32(s), 0.0))) / f32(dims.x);
-                    let v = (f32(coords.y) + rand(SEED + vec2<f32>(0.0, f32(s)))) / f32(dims.y);
+                    let seed = vec2<u32>(coords.x + dims.x * coords.y, s);
+                    let u = (f32(coords.x) + rand(seed)) / f32(dims.x);
+                    let v = (f32(coords.y) + rand(seed + vec2<u32>(1u, 1u))) / f32(dims.y); 
                     let ray = getRay(camera, u, v);
-                    pixel_color += rayColor(ray);
+                    pixel_color += rayColor(ray, seed);
                 }
                 
-                pixel_color = pixel_color / f32(camera.samples_per_pixel); 
-                
+                pixel_color = sqrt(pixel_color / f32(camera.samples_per_pixel)); 
+
                 textureStore(output, vec2<i32>(coords), vec4<f32>(pixel_color, 1.0));
             }
         `
