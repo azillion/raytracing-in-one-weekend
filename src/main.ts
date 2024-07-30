@@ -295,20 +295,34 @@ struct Camera {
     horizontal: vec3<f32>,
     vertical: vec3<f32>,
     samples_per_pixel: u32,
+    vfov: f32,
+    lookfrom: vec3<f32>,
+    lookat: vec3<f32>,
+    vup: vec3<f32>,
 }
 
 fn createCamera(aspect_ratio: f32) -> Camera {
-    let viewport_height = 2.0;
-    let viewport_width = aspect_ratio * viewport_height;
+    let vfov = 20.0;
+    let lookfrom = vec3<f32>(-2.0, 2.0, 1.0);
+    let lookat = vec3<f32>(0.0, 0.0, -1.0);
+    let vup = vec3<f32>(0.0, 1.0, 0.0);
     let focal_length = 1.0;
+    let theta = degreesToRadians(vfov);
+    let h = tan(theta / 2.0);
+    let viewport_height = 2.0 * h * focal_length;
+    let viewport_width = aspect_ratio * viewport_height;
     let samples_per_pixel: u32 = 200;
 
-    let origin = vec3<f32>(0.0, 0.0, 0.0);
-    let horizontal = vec3<f32>(viewport_width, 0.0, 0.0);
-    let vertical = vec3<f32>(0.0, viewport_height, 0.0);
-    let lower_left_corner = origin - horizontal/2.0 - vertical/2.0 - vec3<f32>(0.0, 0.0, focal_length);
+    let w = normalize(lookfrom - lookat);
+    let u = normalize(cross(vup, w));
+    let v = cross(w, u);
 
-    return Camera(origin, lower_left_corner, horizontal, vertical, samples_per_pixel);
+    let origin = lookfrom;
+    let horizontal = viewport_width * u;
+    let vertical = viewport_height * v;
+    let lower_left_corner = origin - horizontal / 2.0 - vertical / 2.0 - w;
+
+    return Camera(origin, lower_left_corner, horizontal, vertical, samples_per_pixel, vfov, lookfrom, lookat, vup);
 }
 
 fn getRay(camera: Camera, u: f32, v: f32) -> Ray {
@@ -340,12 +354,19 @@ function createComputeShader(device: GPUDevice, textureSize: { width: number, he
             const MATERIAL_BUBBLE: Material = Material(vec3<f32>(1.0, 1.0, 1.0), 0.0, 1.0/1.5, 2);
             const MATERIAL_RIGHT: Material = Material(vec3<f32>(0.8, 0.6, 0.2), 1.0, 0.0, 1);
 
+            const R = cos(PI / 4.0);
+
+            // const TEMP_MATERIAL_LEFT: Material = Material(vec3<f32>(0.0, 0.0, 1.0), 0.0, 0.0, 0);
+            // const TEMP_MATERIAL_RIGHT: Material = Material(vec3<f32>(1.0, 0.0, 0.0), 0.0, 0.0, 0);
+
             const spheres = array<Sphere, 5>(
                 Sphere(vec3<f32>(0.0, -100.5, -1.0), 100.0, MATERIAL_GROUND),
                 Sphere(vec3<f32>(0.0, 0.0, -1.2), 0.5, MATERIAL_CENTER),
                 Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.5, MATERIAL_LEFT),
                 Sphere(vec3<f32>(-1.0, 0.0, -1.0), 0.4, MATERIAL_BUBBLE),
                 Sphere(vec3<f32>(1.0, 0.0, -1.0), 0.5, MATERIAL_RIGHT)
+                //Sphere(vec3<f32>(-R, 0.0, -1.0), R, TEMP_MATERIAL_LEFT),
+                //Sphere(vec3<f32>(R, 0.0, -1.0), R, TEMP_MATERIAL_RIGHT)
             );
 
             fn createRay(uv: vec2<f32>) -> Ray {
@@ -522,7 +543,7 @@ async function main() {
     const { device, context, presentationFormat } = await initWebGPU(canvas);
 
     // for now we will hardcode the canvas size
-    const width = 400;
+    const width = 800;
     const aspectRation = 16.0 / 9.0;
     const height = Math.floor(width / aspectRation);
     canvas.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
