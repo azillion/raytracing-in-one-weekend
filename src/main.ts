@@ -23,7 +23,7 @@ export async function initWebGPU(canvas: HTMLCanvasElement) {
     return { device, context, presentationFormat };
 }
 
-const NUM_SPHERES = 30;
+const NUM_SPHERES = 3;
 
 const constants = `
 const PI: f32 = 3.1415926535897932385;
